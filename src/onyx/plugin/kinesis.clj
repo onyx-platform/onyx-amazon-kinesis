@@ -29,51 +29,58 @@
                            (.withEndpointConfiguration (AwsClientBuilder$EndpointConfiguration. endpoint-url region)))]
     (.build builder)))
 
-
-; AT_SEQUENCE_NUMBER - Start reading from the position denoted by a specific sequence number, provided in the value StartingSequenceNumber.
-; AFTER_SEQUENCE_NUMBER - Start reading right after the position denoted by a specific sequence number, provided in the value StartingSequenceNumber.
-; AT_TIMESTAMP - Start reading from the position denoted by a specific timestamp, provided in the value Timestamp.
-; TRIM_HORIZON - Start reading at the last untrimmed record in the shard in the system, which is the oldest data record in the shard.
-; LATEST - Start reading just after the most recent record in the shard, so that you always read the most recent data in the shard.
 (defn shard-initialize-type [task-map]
   (case (:kinesis/shard-initialize-type task-map)
-    :at-sequence-number 
-    "AT_SEQUENCE_NUMBER"
+    ;; Currently unsupported
 
-    :after-sequence-number
-    "AFTER_SEQUENCE_NUMBER"
+    ; :at-sequence-number 
+    ; "AT_SEQUENCE_NUMBER"
 
-    :at-timestamp
-    "AT_TIMESTAMP"
+    ; :after-sequence-number
+    ; "AFTER_SEQUENCE_NUMBER"
+
+    ; :at-timestamp
+    ; "AT_TIMESTAMP"
 
     :trim-horizon
     "TRIM_HORIZON"
 
     :latest
     "LATEST"
-    (throw (Exception. "kinesis/shard-initial setting is invalid."))))
+    (throw (ex-info "kinesis/shard-initialize-type setting is invalid."
+                    {:type (:kinesis/shard-initialize-type task-map)}))))
 
 (def defaults
   {})
 
-; (defn check-num-peers-equals-partitions 
-;   [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/partition] :as task-map} n-partitions]
-;   (let [fixed-partition? (and partition (or (= 1 n-peers)
-;                                             (= 1 max-peers)))
-;         fixed-npeers? (or (= min-peers max-peers) (= 1 max-peers)
-;                           (and n-peers (and (not min-peers) (not max-peers))))
-;         n-peers (or max-peers n-peers)
-;         n-peers-less-eq-n-partitions (<= n-peers n-partitions)] 
-;     (when-not (or fixed-partition? fixed-npeers? n-peers-less-eq-n-partitions)
-;       (let [e (ex-info ":onyx/min-peers must equal :onyx/max-peers, or :onyx/n-peers must be set, and :onyx/min-peers and :onyx/max-peers must not be set. Number of peers should also be less than or equal to the number of partitions."
-;                        {:n-partitions n-partitions 
-;                         :n-peers n-peers
-;                         :min-peers min-peers
-;                         :max-peers max-peers
-;                         :recoverable? false
-;                         :task-map task-map})] 
-;         (log/error e)
-;         (throw e)))))
+(defn check-shard-properties! 
+  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} client stream-name]
+  (let [desc (.getStreamDescription (.describeStream client stream-name))
+        _ (when (not= (.getStreamStatus desc) "ACTIVE")
+            (throw (ex-info "Stream is not currently active."
+                            {:status (.getStreamStatus desc)
+                             :recoverable? true})))
+        _ (when (.isHasMoreShards desc)
+            (throw (ex-info "More shards available, and unable to determine whether the number of peers matches the number of shards. This case is not currently handled."
+                            {:recoverable? false})))
+        n-shards (count (.getShards desc))
+        fixed-shard? (and shard 
+                          (or (= 1 n-peers)
+                              (= 1 max-peers)))
+        fixed-npeers? (or (= min-peers max-peers) (= 1 max-peers)
+                          (and n-peers (and (not min-peers) (not max-peers))))
+        n-peers (or max-peers n-peers)
+        n-peers-less-eq-n-shards (<= n-peers n-shards)] 
+    (when-not (or fixed-shard? fixed-npeers? n-peers-less-eq-n-shards)
+      (let [e (ex-info ":onyx/min-peers must equal :onyx/max-peers, or :onyx/n-peers must be set, and :onyx/min-peers and :onyx/max-peers must not be set. Number of peers should also be less than or equal to the number of shards"
+                       {:n-partitions n-shards 
+                        :n-peers n-peers
+                        :min-peers min-peers
+                        :max-peers max-peers
+                        :recoverable? false
+                        :task-map task-map})] 
+        (log/error e)
+        (throw e)))))
 
 (defn new-record-request [shard-iterator limit]
   (-> (GetRecordsRequest.)
@@ -87,14 +94,14 @@
    :data (deserializer-fn (.array (.getData rec)))})
 
 (deftype KinesisReadMessages 
-  [log-prefix task-map slot-id stream-name batch-size batch-timeout deserializer-fn client
+  [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn client
    ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator]
   p/Plugin
   (start [this event]
-    (let [{:keys []} task-map
-          _ (s/validate onyx.tasks.kinesis/KinesisInputTaskMap task-map)
-          _ (info log-prefix "Starting kinesis/read-messages task")]
-      this))
+    (info log-prefix "Starting kinesis/read-messages task")
+    (check-shard-properties! task-map client stream-name)
+    (s/validate onyx.tasks.kinesis/KinesisInputTaskMap task-map)
+    this)
 
   (stop [this event] 
     this)
@@ -107,12 +114,12 @@
     (let [initial (if checkpoint 
                     (-> (GetShardIteratorRequest.)
                         (.withStreamName stream-name)
-                        (.withShardId (str slot-id))
+                        (.withShardId shard-id)
                         (.withStartingSequenceNumber checkpoint)
                         (.withShardIteratorType "AT_SEQUENCE_NUMBER"))
                     (-> (GetShardIteratorRequest.)
                         (.withStreamName stream-name)
-                        (.withShardId (str slot-id))
+                        (.withShardId shard-id)
                         (.withShardIteratorType (shard-initialize-type task-map))))
           shard-iter (.getShardIterator (.getShardIterator client initial))]
       (set! shard-iterator shard-iter)
@@ -135,9 +142,9 @@
             items* (.getRecords record-result)]
         (set! items (rest items*))
         (set! shard-iterator (.getNextShardIterator record-result))
-        (some-> items*
-                (first)
-                (rec->segment deserializer-fn)))
+        (when-let [rec (first items*)]
+          (set! offset (.getSequenceNumber rec))
+          (rec->segment rec deserializer-fn)))
       (let [items* (rest items)
             rec ^Record (first items)]
         (set! offset (.getSequenceNumber rec))
@@ -149,10 +156,12 @@
         batch-timeout (arg-or-default :onyx/batch-timeout task-map)
         batch-size (:onyx/batch-size task-map)
         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
+        shard-id (str (if-let [shard (:kinesis/shard task-map)]
+                        shard
+                        slot-id))
         client (new-client task-map)]
-    (->KinesisReadMessages log-prefix task-map slot-id stream-name batch-size 
+    (->KinesisReadMessages log-prefix task-map shard-id stream-name batch-size 
                            batch-timeout deserializer-fn client nil nil nil)))
-
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
   (-> (PutRecordsRequestEntry.)
@@ -162,7 +171,9 @@
 (defn build-put-request [stream-name segments serializer-fn]
   (-> (PutRecordsRequest.)
       (.withStreamName stream-name)
-      (.withRecords (doall (map (fn [seg] (segment->put-records-entry seg serializer-fn)) segments)))))
+      (.withRecords (->> segments
+                         (map (fn [seg] (segment->put-records-entry seg serializer-fn)))
+                         (doall)))))
 
 (defrecord KinesisWriteMessages [task-map config stream-name client serializer-fn]
   p/Plugin
@@ -170,6 +181,7 @@
     this)
 
   (stop [this event] 
+    (.shutdown client)
     this)
 
   p/BarrierSynchronization
@@ -199,6 +211,8 @@
     ;(when @exception (throw @exception))
     (let [segments (mapcat :leaves (:tree results))]
       ;; check PutRecordsResult 0x38a71aa0 {FailedRecordCount
+      ;; Need to handle FailedRecordCount
+      ;; Also need to group by stream-name / default it.
       (when-not (empty? segments)
         (.putRecords client 
                      (build-put-request stream-name 
@@ -209,7 +223,7 @@
 (def write-defaults {})
 
 (defn write-messages [{:keys [onyx.core/task-map onyx.core/log-prefix] :as event}]
-  (let [;_ (s/validate onyx.tasks.kinesis/kinesisOutputTaskMap task-map)
+  (let [_ (s/validate onyx.tasks.kinesis/KinesisOutputTaskMap task-map)
         _ (info log-prefix "Starting kinesis/write-messages task")
         stream-name (:kinesis/stream-name task-map)
         config {}
