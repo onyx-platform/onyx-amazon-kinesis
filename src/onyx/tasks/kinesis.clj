@@ -17,12 +17,19 @@
     (catch Exception e
       {:error e})))
 
+(def ShardInitializeType 
+  (s/enum :at-sequence-number :after-sequence-number 
+          :at-timestamp :trim-horizon :latest))
+
 (def KinesisInputTaskMap
   {:kinesis/stream-name s/Str
-   ;:kinesis/offset-reset (s/enum :earliest :latest)
+   :kinesis/shard-initialize-type ShardInitializeType
    :kinesis/deserializer-fn os/NamespacedKeyword
-   (s/optional-key :kinesis/shard) (s/cond-pre s/Int s/Str)
-   (s/optional-key :kinesis/wrap-with-metadata?) s/Bool
+   (s/optional-key :kinesis/region) s/Str
+   (s/optional-key :kinesis/access-key) s/Str
+   (s/optional-key :kinesis/secret-key) s/Str
+   (s/optional-key :kinesis/endpoint-url) s/Str
+   ;(s/optional-key :kinesis/shard) (s/cond-pre s/Int s/Str)
    (os/restricted-ns :kinesis) s/Any})
 
 (s/defn ^:always-validate consumer
@@ -31,24 +38,18 @@
                              :onyx/plugin :onyx.plugin.kinesis/read-messages
                              :onyx/type :input
                              :onyx/medium :kinesis
-                             :kinesis/receive-buffer-bytes 65536
-                             :kinesis/wrap-with-metadata? false
                              :onyx/doc "Reads messages from a kinesis topic"}
                             opts)
            :lifecycles [{:lifecycle/task task-name
                          :lifecycle/calls :onyx.plugin.kinesis/read-messages-calls}]}
     :schema {:task-map KinesisInputTaskMap}})
   ([task-name :- s/Keyword
-    topic :- s/Str
-    group-id :- s/Str
-    zookeeper :- s/Str
-    offset-reset :- (s/enum :smallest :largest)
+    stream-name :- s/Str
+    shard-initialize-type :- ShardInitializeType
     deserializer-fn :- os/NamespacedKeyword
     task-opts :- {s/Any s/Any}]
-   (consumer task-name (merge {:kinesis/topic topic
-                               :kinesis/group-id group-id
-                               :kinesis/zookeeper zookeeper
-                               :kinesis/offset-reset offset-reset
+   (consumer task-name (merge {:kinesis/stream-name stream-name
+                               :kinesis/shard-initialize-type shard-initialize-type
                                :kinesis/deserializer-fn deserializer-fn}
                               task-opts))))
 
@@ -60,9 +61,9 @@
   (.getBytes (pr-str segment)))
 
 (def KinesisOutputTaskMap
-  {(s/optional-key :kinesis/stream-name) s/Str
-   :kinesis/serializer-fn os/NamespacedKeyword
-   :kinesis/region s/Str
+  {:kinesis/serializer-fn os/NamespacedKeyword
+   (s/optional-key :kinesis/stream-name) s/Str
+   (s/optional-key :kinesis/region) s/Str
    (s/optional-key :kinesis/access-key) s/Str
    (s/optional-key :kinesis/secret-key) s/Str
    (s/optional-key :kinesis/endpoint-url) s/Str

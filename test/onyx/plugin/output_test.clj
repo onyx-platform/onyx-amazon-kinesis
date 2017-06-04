@@ -46,35 +46,18 @@
 ; AT_TIMESTAMP - Start reading from the position denoted by a specific timestamp, provided in the value Timestamp.
 ; TRIM_HORIZON - Start reading at the last untrimmed record in the shard in the system, which is the oldest data record in the shard.
 ; LATEST - Start reading just after the most recent record in the shard, so that you always read the most recent data in the shard.
-
 (defn get-records [client shard-iterator]
   (let [records-request (-> (GetRecordsRequest.)
                             (.withShardIterator shard-iterator)
-                            (.withLimit (Integer. 100)))
+                            (.withLimit (int 100)))
         records-result (.getRecords client records-request)]
     (mapv (fn [rec]
             (deserialize-message-edn (.array (.getData rec))))
           (.getRecords records-result))))
 
 (deftest kinesis-output-test
-  #_(let [client (new-client :region "us-west-2")
-        stream-name "ulul" ;(str (java.util.UUID/randomUUID))
-        n-shards (Integer. 1)
-        ;stream-result (.createStream client stream-name n-shards)
-        partition-key "1"
-        v {:n 1}
-        buf (ByteBuffer/wrap (messaging-compress v))
-        
-        ]
-    (try 
-         (finally #_(.deleteStream client stream-name))))
-
-
-
-
   (let [stream-name "ulul"
         client (onyx.plugin.kinesis/new-client {:kinesis/region "us-west-2"})
-        other-test-topic (str "onyx-test-other-" (java.util.UUID/randomUUID))
         {:keys [test-config env-config peer-config]} (onyx.plugin.test-utils/read-config)
         tenancy-id (str (java.util.UUID/randomUUID)) 
         env-config (assoc env-config :onyx/tenancy-id tenancy-id)
@@ -89,11 +72,7 @@
         iterator-req (-> (GetShardIteratorRequest.)
                          (.withStreamName stream-name)
                          (.withShardId "0")
-                         (.withShardIteratorType "LATEST")
-                         ;(.withShardIteratorType "TRIM_HORIZON")
-                         ;(.withStartingSequenceNumber "49573812914632281574061715832514992608029238289516986370")
-                         ;(.withShardIteratorType "AT_SEQUENCE_NUMBER")
-                         )
+                         (.withShardIteratorType "LATEST"))
         iterator-result (.getShardIterator client iterator-req)
         shard-iterator (.getShardIterator iterator-result)]
       (with-test-env [test-env [4 env-config peer-config]]

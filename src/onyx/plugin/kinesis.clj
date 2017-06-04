@@ -29,11 +29,32 @@
                            (.withEndpointConfiguration (AwsClientBuilder$EndpointConfiguration. endpoint-url region)))]
     (.build builder)))
 
+
+; AT_SEQUENCE_NUMBER - Start reading from the position denoted by a specific sequence number, provided in the value StartingSequenceNumber.
+; AFTER_SEQUENCE_NUMBER - Start reading right after the position denoted by a specific sequence number, provided in the value StartingSequenceNumber.
+; AT_TIMESTAMP - Start reading from the position denoted by a specific timestamp, provided in the value Timestamp.
+; TRIM_HORIZON - Start reading at the last untrimmed record in the shard in the system, which is the oldest data record in the shard.
+; LATEST - Start reading just after the most recent record in the shard, so that you always read the most recent data in the shard.
+(defn shard-initialize-type [task-map]
+  (case (:kinesis/shard-initialize-type task-map)
+    :at-sequence-number 
+    "AT_SEQUENCE_NUMBER"
+
+    :after-sequence-number
+    "AFTER_SEQUENCE_NUMBER"
+
+    :at-timestamp
+    "AT_TIMESTAMP"
+
+    :trim-horizon
+    "TRIM_HORIZON"
+
+    :latest
+    "LATEST"
+    (throw (Exception. "kinesis/shard-initial setting is invalid."))))
+
 (def defaults
   {})
-
-(defn seek-offset! []
-  )
 
 ; (defn check-num-peers-equals-partitions 
 ;   [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/partition] :as task-map} n-partitions]
@@ -54,143 +75,83 @@
 ;         (log/error e)
 ;         (throw e)))))
 
-; (defn assign-partitions-to-slot! [consumer* task-map topic n-partitions slot]
-;   (if-let [part (:partition task-map)]
-;     (let [p (Integer/parseInt part)]
-;       (cp/assign-partitions! consumer* [{:topic topic :partition p}])
-;       [p])
-;     (let [n-slots (or (:onyx/n-peers task-map) (:onyx/max-peers task-map))
-;           [lower upper] (partitions-for-slot n-partitions n-slots slot)
-;           parts-range (range lower (inc upper))
-;           parts (map (fn [p] {:topic topic :partition p}) parts-range)]
-;       (cp/assign-partitions! consumer* parts)
-;       parts-range)))
+(defn new-record-request [shard-iterator limit]
+  (-> (GetRecordsRequest.)
+      (.withShardIterator shard-iterator)
+      (.withLimit (int limit))))
 
-; (deftype kinesisReadMessages 
-;   [log-prefix task-map topic ^:unsynchronized-mutable kpartitions batch-timeout
-;    deserializer-fn segment-fn read-offset ^:unsynchronized-mutable consumer 
-;    ^:unsynchronized-mutable iter ^:unsynchronized-mutable partition->offset ^:unsynchronized-mutable drained]
-;   p/Plugin
-;   (start [this event]
-;     (let [{:keys [kinesis/group-id kinesis/consumer-opts]} task-map
-;           brokers (find-brokers task-map)
-;           _ (s/validate onyx.tasks.kinesis/kinesisInputTaskMap task-map)
-;           consumer-config (merge {:bootstrap.servers brokers
-;                                   :group.id (or group-id "onyx")
-;                                   :enable.auto.commit false
-;                                   :receive.buffer.bytes (or (:kinesis/receive-buffer-bytes task-map)
-;                                                             (:kinesis/receive-buffer-bytes defaults))
-;                                   :auto.offset.reset (:kinesis/offset-reset task-map)}
-;                                  consumer-opts)
-;           _ (info log-prefix "Starting kinesis/read-messages task with consumer opts:" consumer-config)
-;           key-deserializer (byte-array-deserializer)
-;           value-deserializer (byte-array-deserializer)
-;           consumer* (consumer/make-consumer consumer-config key-deserializer value-deserializer)
-;           partitions (mapv :partition (metadata/partitions-for consumer* topic))
-;           n-partitions (count partitions)]
-;       (check-num-peers-equals-partitions task-map n-partitions)
-;       (let [kpartitions* (assign-partitions-to-slot! consumer* task-map topic n-partitions (:onyx.core/slot-id event))]
-;         (set! consumer consumer*)
-;         (set! kpartitions kpartitions*)
-;         this)))
+(defn rec->segment [^Record rec deserializer-fn]
+  {:timestamp (.getApproximateArrivalTimestamp rec)
+   :partition-key (.getPartitionKey rec)
+   :sequence-number (.getSequenceNumber rec)
+   :data (deserializer-fn (.array (.getData rec)))})
 
-;   (stop [this event] 
-;     (when consumer 
-;       (.close ^FranzConsumer consumer)
-;       (set! consumer nil))
-;     this)
+(deftype KinesisReadMessages 
+  [log-prefix task-map slot-id stream-name batch-size batch-timeout deserializer-fn client
+   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator]
+  p/Plugin
+  (start [this event]
+    (let [{:keys []} task-map
+          _ (s/validate onyx.tasks.kinesis/KinesisInputTaskMap task-map)
+          _ (info log-prefix "Starting kinesis/read-messages task")]
+      this))
 
-;   p/Checkpointed
-;   (checkpoint [this]
-;     partition->offset)
+  (stop [this event] 
+    this)
 
-;   (recover! [this replica-version checkpoint]
-;     (set! drained false)
-;     (set! iter nil)
-;     (set! partition->offset checkpoint)
-;     (seek-offset! log-prefix consumer kpartitions task-map topic checkpoint)
-;     this)
+  p/Checkpointed
+  (checkpoint [this]
+    offset)
 
-;   (checkpointed! [this epoch])
+  (recover! [this replica-version checkpoint]
+    (let [initial (if checkpoint 
+                    (-> (GetShardIteratorRequest.)
+                        (.withStreamName stream-name)
+                        (.withShardId (str slot-id))
+                        (.withStartingSequenceNumber checkpoint)
+                        (.withShardIteratorType "AT_SEQUENCE_NUMBER"))
+                    (-> (GetShardIteratorRequest.)
+                        (.withStreamName stream-name)
+                        (.withShardId (str slot-id))
+                        (.withShardIteratorType (shard-initialize-type task-map))))
+          shard-iter (.getShardIterator (.getShardIterator client initial))]
+      (set! shard-iterator shard-iter)
+      (set! offset checkpoint))
+    this)
 
-;   p/BarrierSynchronization
-;   (synced? [this epoch]
-;     true)
+  (checkpointed! [this epoch])
 
-;   (completed? [this]
-;     drained)
+  p/BarrierSynchronization
+  (synced? [this epoch]
+    true)
 
-;   p/Input
-;   (poll! [this _]
-;     (if (and iter (.hasNext ^java.util.Iterator iter))
-;       (let [rec ^ConsumerRecord (.next ^java.util.Iterator iter)
-;             deserialized (some-> rec segment-fn)]
-;         (cond (= :done deserialized)
-;               (do (set! drained true)
-;                   nil)
-;               deserialized
-;               (let [new-offset (.offset rec)
-;                     part (.partition rec)]
-;                 (.set ^AtomicLong read-offset new-offset)
-;                 (set! partition->offset (assoc partition->offset part new-offset))
-;                 deserialized)))
-;       (do (set! iter 
-;                 (.iterator ^ConsumerRecords 
-;                            (.poll ^Consumer (.consumer ^FranzConsumer consumer) 
-;                                   batch-timeout)))
-;           nil))))
+  (completed? [this]
+    false)
 
-; (defn read-messages [{:keys [onyx.core/task-map onyx.core/log-prefix onyx.core/monitoring] :as event}]
-;   (let [{:keys [kinesis/topic kinesis/deserializer-fn]} task-map
-;         batch-timeout (arg-or-default :onyx/batch-timeout task-map)
-;         wrap-message? (or (:kinesis/wrap-with-metadata? task-map) (:kinesis/wrap-with-metadata? defaults))
-;         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
-;         key-deserializer-fn (if-let [kw (:kinesis/key-deserializer-fn task-map)] (kw->fn kw) identity)
-;         segment-fn (if wrap-message?
-;                      (fn [^ConsumerRecord cr]
-;                        {:topic (.topic cr)
-;                         :partition (.partition cr)
-;                         :key (when-let [k (.key cr)] (key-deserializer-fn k))
-;                         :message (deserializer-fn (.value cr))
-;                         :serialized-key-size (.serializedKeySize cr)
-;                         :serialized-value-size (.serializedValueSize cr)
-;                         :timestamp (.timestamp cr)
-;                         :offset (.offset cr)})
-;                      (fn [^ConsumerRecord cr]
-;                        (deserializer-fn (.value cr))))
-;         read-offset (:read-offset monitoring)]
-;     (->kinesisReadMessages log-prefix task-map topic nil batch-timeout
-;                          deserializer-fn segment-fn read-offset nil nil nil false)))
+  p/Input
+  (poll! [this _]
+    (if (empty? items)
+      (let [record-result (.getRecords client (new-record-request shard-iterator batch-size))
+            items* (.getRecords record-result)]
+        (set! items (rest items*))
+        (set! shard-iterator (.getNextShardIterator record-result))
+        (some-> items*
+                (first)
+                (rec->segment deserializer-fn)))
+      (let [items* (rest items)
+            rec ^Record (first items)]
+        (set! offset (.getSequenceNumber rec))
+        (set! items items*)
+        (rec->segment rec deserializer-fn)))))
 
-
-(defn- message->producer-record
-  [key-serializer-fn serializer-fn topic kpartition m]
-  (let [message (:message m)
-        k (some-> m :key serializer-fn)
-        message-topic (get m :topic topic)
-        message-partition (some-> m (get :partition kpartition) int)]
-    (cond (not (contains? m :message))
-          (throw (ex-info "Payload is missing required. Need message key :message"
-                          {:recoverable? false
-                           :payload m}))
-
-          (nil? message-topic)
-          (throw (ex-info
-                  (str "Unable to write message payload to kinesis! "
-                       "Both :kinesis/topic, and :topic in message payload "
-                       "are missing!")
-                  {:recoverable? false
-                   :payload m}))
-
-          :else
-          {:my :thing}
-          #_(ProducerRecord. message-topic message-partition k (serializer-fn message)))))
-
-(defn clear-write-futures! [fs]
-  (doall (remove (fn [f] 
-                   (assert (not (.isCancelled ^java.util.concurrent.Future f)))
-                   (realized? f)) 
-                 fs)))
+(defn read-messages [{:keys [onyx.core/task-map onyx.core/log-prefix onyx.core/monitoring onyx.core/slot-id] :as event}]
+  (let [{:keys [kinesis/stream-name kinesis/deserializer-fn]} task-map
+        batch-timeout (arg-or-default :onyx/batch-timeout task-map)
+        batch-size (:onyx/batch-size task-map)
+        deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
+        client (new-client task-map)]
+    (->KinesisReadMessages log-prefix task-map slot-id stream-name batch-size 
+                           batch-timeout deserializer-fn client nil nil nil)))
 
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
