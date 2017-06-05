@@ -67,7 +67,6 @@
    (s/optional-key :kinesis/access-key) s/Str
    (s/optional-key :kinesis/secret-key) s/Str
    (s/optional-key :kinesis/endpoint-url) s/Str
-   (s/optional-key :kinesis/shard) (s/cond-pre s/Int s/Str)
    (os/restricted-ns :kinesis) s/Any})
 
 (s/defn ^:always-validate producer

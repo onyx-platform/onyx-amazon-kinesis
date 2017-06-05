@@ -4,14 +4,15 @@
             [onyx.static.default-vals :refer [arg-or-default]]
             [onyx.plugin.protocols :as p]
             [onyx.static.util :refer [kw->fn]]
-            ;[onyx.tasks.kinesis]
             [schema.core :as s]
             [onyx.api])
   (:import [java.util.concurrent.atomic AtomicLong]
-           [com.amazonaws.services.kinesis AmazonKinesisClient AmazonKinesisClientBuilder]
+           [com.amazonaws.services.kinesis 
+            AmazonKinesisClient AmazonKinesisAsyncClient
+            AmazonKinesisClientBuilder AmazonKinesisAsyncClientBuilder]
            [com.amazonaws.auth AWSStaticCredentialsProvider BasicAWSCredentials]
            [com.amazonaws.client.builder AwsClientBuilder$EndpointConfiguration]
-           [com.amazonaws.services.kinesis.model GetShardIteratorRequest GetRecordsRequest 
+           [com.amazonaws.services.kinesis.model GetShardIteratorRequest GetRecordsRequest DescribeStreamResult
             Record PutRecordsRequest PutRecordsRequestEntry]
            [java.nio ByteBuffer]))
 
@@ -29,9 +30,23 @@
                            (.withEndpointConfiguration (AwsClientBuilder$EndpointConfiguration. endpoint-url region)))]
     (.build builder)))
 
-(defn shard-initialize-type [task-map]
+(defn new-async-client ^AmazonKinesisAsyncClient
+  [{:keys [kinesis/access-key kinesis/secret-key kinesis/region kinesis/endpoint-url]}]
+  (if-let [builder (cond-> (AmazonKinesisAsyncClientBuilder/standard)
+
+                           access-key ^AmazonKinesisAsyncClientBuilder 
+                           (.withCredentials (AWSStaticCredentialsProvider. (BasicAWSCredentials. access-key secret-key)))
+
+                           region ^AmazonKinesisAsyncClientBuilder
+                           (.withRegion ^String region)
+
+                           endpoint-url ^AmazonKinesisAsyncClientBuilder
+                           (.withEndpointConfiguration (AwsClientBuilder$EndpointConfiguration. endpoint-url region)))]
+    (.build builder)))
+
+(defn shard-initialize-type ^String [task-map]
   (case (:kinesis/shard-initialize-type task-map)
-    ;; Currently unsupported
+    ;; Currently unsupported initialize types
 
     ; :at-sequence-number 
     ; "AT_SEQUENCE_NUMBER"
@@ -54,8 +69,8 @@
   {})
 
 (defn check-shard-properties! 
-  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} client stream-name]
-  (let [desc (.getStreamDescription (.describeStream client stream-name))
+  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} ^AmazonKinesisClient client ^String stream-name]
+  (let [desc (.getStreamDescription ^DescribeStreamResult (.describeStream client stream-name))
         _ (when (not= (.getStreamStatus desc) "ACTIVE")
             (throw (ex-info "Stream is not currently active."
                             {:status (.getStreamStatus desc)
@@ -94,7 +109,7 @@
    :data (deserializer-fn (.array (.getData rec)))})
 
 (deftype KinesisReadMessages 
-  [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn client
+  [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
    ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator]
   p/Plugin
   (start [this event]
@@ -116,7 +131,7 @@
                         (.withStreamName stream-name)
                         (.withShardId shard-id)
                         (.withStartingSequenceNumber checkpoint)
-                        (.withShardIteratorType "AT_SEQUENCE_NUMBER"))
+                        (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))
                     (-> (GetShardIteratorRequest.)
                         (.withStreamName stream-name)
                         (.withShardId shard-id)
@@ -142,7 +157,7 @@
             items* (.getRecords record-result)]
         (set! items (rest items*))
         (set! shard-iterator (.getNextShardIterator record-result))
-        (when-let [rec (first items*)]
+        (when-let [rec ^Record (first items*)]
           (set! offset (.getSequenceNumber rec))
           (rec->segment rec deserializer-fn)))
       (let [items* (rest items)
@@ -169,13 +184,14 @@
       (.withData (ByteBuffer/wrap (serializer-fn data)))))
 
 (defn build-put-request [stream-name segments serializer-fn]
-  (-> (PutRecordsRequest.)
-      (.withStreamName stream-name)
-      (.withRecords (->> segments
-                         (map (fn [seg] (segment->put-records-entry seg serializer-fn)))
-                         (doall)))))
+  (let [records (->> segments
+                     (map (fn [seg] (segment->put-records-entry seg serializer-fn)))
+                     (into-array PutRecordsRequestEntry))] 
+    (-> (PutRecordsRequest.)
+        (.withStreamName stream-name)
+        (.withRecords ^"[Lcom.amazonaws.services.kinesis.model.PutRecordsRequestEntry;" records))))
 
-(defrecord KinesisWriteMessages [task-map config stream-name client serializer-fn]
+(defrecord KinesisWriteMessages [task-map config stream-name ^AmazonKinesisClient client serializer-fn]
   p/Plugin
   (start [this event] 
     this)
@@ -186,17 +202,10 @@
 
   p/BarrierSynchronization
   (synced? [this epoch]
-    ; (when @exception (throw @exception))
-    ; (empty? (vswap! write-futures clear-write-futures!))
-    true
-    
-    )
+    true)
 
   (completed? [this]
-    ; (when @exception (throw @exception))
-    ; (empty? (vswap! write-futures clear-write-futures!))
-    true
-    )
+    true)
 
   p/Checkpointed
   (recover! [this _ _] 
@@ -208,16 +217,16 @@
   (prepare-batch [this event replica _]
     true)
   (write-batch [this {:keys [onyx.core/results]} replica _]
-    ;(when @exception (throw @exception))
     (let [segments (mapcat :leaves (:tree results))]
-      ;; check PutRecordsResult 0x38a71aa0 {FailedRecordCount
-      ;; Need to handle FailedRecordCount
-      ;; Also need to group by stream-name / default it.
       (when-not (empty? segments)
-        (.putRecords client 
-                     (build-put-request stream-name 
-                                        segments 
-                                        serializer-fn))))
+        (let [put-results (.putRecords client 
+                                       (build-put-request stream-name 
+                                                          segments 
+                                                          serializer-fn))]
+
+          (when-not (zero? (.getFailedRecordCount put-results))
+            (throw (ex-info "Put request failed. Rewinding job."
+                            {:restartable? true}))))))
     true))
 
 (def write-defaults {})
@@ -229,6 +238,8 @@
         config {}
         serializer-fn (kw->fn (:kinesis/serializer-fn task-map))
         client (new-client task-map)]
+    (when (> (:onyx/batch-size task-map) 500)
+      (throw (ex-info "Batch size greater than maximum kinesis write size of 500" task-map)))
     (->KinesisWriteMessages task-map config stream-name client serializer-fn)))
 
 (defn read-handle-exception [event lifecycle lf-kw exception]
