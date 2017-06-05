@@ -46,7 +46,15 @@
 
 (defn shard-initialize-type ^String [task-map]
   (case (:kinesis/shard-initialize-type task-map)
+
+    :trim-horizon
+    "TRIM_HORIZON"
+
+    :latest
+    "LATEST"
+
     ;; Currently unsupported initialize types
+    ;; Requires extra task-map / initialization support
 
     ; :at-sequence-number 
     ; "AT_SEQUENCE_NUMBER"
@@ -57,11 +65,6 @@
     ; :at-timestamp
     ; "AT_TIMESTAMP"
 
-    :trim-horizon
-    "TRIM_HORIZON"
-
-    :latest
-    "LATEST"
     (throw (ex-info "kinesis/shard-initialize-type setting is invalid."
                     {:type (:kinesis/shard-initialize-type task-map)}))))
 
