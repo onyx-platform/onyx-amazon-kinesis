@@ -65,8 +65,8 @@ Lifecycle entry:
 |`:kinesis/shard`                     | `integer or string` |         | Optional: shard to read or write to from if auto-assignment is not used
 |`:kinesis/shard-initialize-type`     | `keyword` |         | Offset bound to seek to when not found - `:latest` or `:trim-horizon`
 |`:kinesis/deserializer-fn`           | `keyword` |         | A keyword that represents a fully qualified namespaced function to deserialize a record's value. Takes one argument - a byte array
-|`:kinesis/region`                    | `string`  |         | Optional: kinesis AWS region
-|`:kinesis/endpoint-url`              | `string`  |         | Optional: The kinesis endpoint-url to connect to.
+|`:kinesis/region`                    | `string`  |         | Optional: Kinesis AWS region
+|`:kinesis/endpoint-url`              | `string`  |         | Optional: The Kinesis endpoint-url to connect to.
 |`:kinesis/access-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
 |`:kinesis/secret-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
 

@@ -69,12 +69,18 @@
                    {:partition-key "tarein" :data {:n 2}}
                    {:partition-key 3 :data {:n 3}}]
         ;; get shard offset prior to writing any messages
-        iterator-req (-> (GetShardIteratorRequest.)
-                         (.withStreamName stream-name)
-                         (.withShardId "0")
-                         (.withShardIteratorType "LATEST"))
-        iterator-result (.getShardIterator client iterator-req)
-        shard-iterator (.getShardIterator iterator-result)]
+        iterator-req1 (-> (GetShardIteratorRequest.)
+                          (.withStreamName stream-name)
+                          (.withShardId "0")
+                          (.withShardIteratorType "LATEST"))
+        iterator-result1 (.getShardIterator client iterator-req1)
+        shard-iterator1 (.getShardIterator iterator-result1)
+        iterator-req2 (-> (GetShardIteratorRequest.)
+                          (.withStreamName stream-name)
+                          (.withShardId "1")
+                          (.withShardIteratorType "LATEST"))
+        iterator-result2 (.getShardIterator client iterator-req2)
+        shard-iterator2 (.getShardIterator iterator-result2)]
       (with-test-env [test-env [4 env-config peer-config]]
         (onyx.test-helper/validate-enough-peers! test-env job)
         (run! #(>!! in %) test-data)
@@ -83,6 +89,7 @@
              :job-id
              (onyx.test-helper/feedback-exception! peer-config))
         (testing "routing to default topic"
-          (let [msgs (get-records client shard-iterator)]
+          (let [msgs (into (get-records client shard-iterator1)
+                           (get-records client shard-iterator2))]
             (is (= [{:n 0} {:n 1} {:n 2} {:n 3}]
                    msgs)))))))

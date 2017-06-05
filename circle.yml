@@ -8,10 +8,6 @@ dependencies:
   override:
     - echo '{:user {:plugins [[lein-voom "0.1.0-20160311_203101-g259fbfc"]]}}' > ~/.lein/profiles.clj
     - lein voom build-deps
-  pre:
-    - sudo service docker start   
-    - sudo stop zookeeper
-    - docker-compose up -d
 
 test:
   override:

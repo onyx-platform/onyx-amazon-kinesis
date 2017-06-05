@@ -10,7 +10,7 @@
             [onyx.plugin.kinesis]
             [onyx.api]))
 
-(def n-partitions 1)
+(def n-partitions 2)
 
 (def test-state (atom nil))
 
