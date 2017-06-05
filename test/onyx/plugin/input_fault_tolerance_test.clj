@@ -12,16 +12,16 @@
 
 (def n-partitions 1)
 
-(def test-state (atom #{}))
+(def test-state (atom nil))
 
 (defn update-atom! [event window trigger {:keys [lower-bound upper-bound event-type] :as state-event} extent-state]
-  (swap! test-state into extent-state))
+  (reset! test-state extent-state))
 
 (def read-crash
   {:lifecycle/after-batch
    (fn [event lifecycle]
      (when (and (not (empty? (:onyx.core/batch event)))
-                (zero? (rand-int 50)))
+                (zero? (rand-int 70)))
        (println "Cycle job.")
        (throw (ex-info "Restartable" {:restartable? true})))
      {})
@@ -75,20 +75,21 @@
         client (onyx.plugin.kinesis/new-client {:kinesis/region "us-west-2"})
         job (build-job stream-name region 1 1000)
         {:keys [out read-messages]} (get-core-async-channels job)]
-      (with-test-env [test-env [(+ n-partitions 2) env-config peer-config]]
-        ;; Give it some time to initialize to latest
+    (reset! test-state nil)
+    (with-test-env [test-env [(+ n-partitions 2) env-config peer-config]]
+      ;; Give it some time to initialize to latest
 
-        (onyx.test-helper/validate-enough-peers! test-env job)
-        (let [job-id (:job-id (onyx.api/submit-job peer-config job))]
-          (Thread/sleep 2000)
-          (.putRecords client 
-                       (onyx.plugin.kinesis/build-put-request stream-name 
-                                                              segments 
-                                                              onyx.tasks.kinesis/serialize-message-edn))
-          (println "Taking segments")
-          ;(onyx.test-helper/feedback-exception! peer-config job-id)
-          (let [results (onyx.plugin.core-async/take-segments! out 30000)] 
-            (is (= (set (mapv :data segments)) (set (mapv :data results)))))
-          (is (= (mapv :data segments) (sort-by :n (mapv :data @test-state))))
-          (println "Done taking segments")
-          (onyx.api/kill-job peer-config job-id)))))
+      (onyx.test-helper/validate-enough-peers! test-env job)
+      (let [job-id (:job-id (onyx.api/submit-job peer-config job))]
+        (Thread/sleep 2000)
+        (.putRecords client 
+                     (onyx.plugin.kinesis/build-put-request stream-name 
+                                                            segments 
+                                                            onyx.tasks.kinesis/serialize-message-edn))
+        (println "Taking segments")
+        ;(onyx.test-helper/feedback-exception! peer-config job-id)
+        (let [results (onyx.plugin.core-async/take-segments! out 30000)] 
+          (is (= (set (mapv :data segments)) (set (mapv :data results)))))
+        (is (= (mapv :data segments) (sort-by :n (mapv :data @test-state))))
+        (println "Done taking segments")
+        (onyx.api/kill-job peer-config job-id)))))
