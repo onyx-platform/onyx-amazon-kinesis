@@ -154,7 +154,7 @@
     false)
 
   p/Input
-  (poll! [this _]
+  (poll! [this _ _]
     (if (empty? items)
       (let [record-result (.getRecords client (new-record-request shard-iterator batch-size))
             items* (.getRecords record-result)]
