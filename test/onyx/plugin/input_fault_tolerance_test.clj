@@ -88,7 +88,7 @@
                                                             onyx.tasks.kinesis/serialize-message-edn))
         (println "Taking segments")
         ;(onyx.test-helper/feedback-exception! peer-config job-id)
-        (let [results (onyx.plugin.core-async/take-segments! out 45000)] 
+        (let [results (onyx.plugin.core-async/take-segments! out 120000)] 
           (is (= (set (mapv :data segments)) (set (mapv :data results)))))
         (is (= (mapv :data segments) (sort-by :n (mapv :data @test-state))))
         (println "Done taking segments")
