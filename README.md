@@ -7,7 +7,7 @@ Onyx plugin providing consumer and producer facilities for kinesis.
 In your project file:
 
 ```clojure
-[org.onyxplatform/onyx-kinesis "0.11.0.0-alpha5"]
+[org.onyxplatform/onyx-kinesis "0.11.0.0-SNAPSHOT"]
 ```
 
 In your peer boot-up namespace:
