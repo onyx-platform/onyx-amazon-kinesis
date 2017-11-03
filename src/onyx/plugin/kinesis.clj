@@ -3,6 +3,7 @@
             [taoensso.timbre :as log :refer [fatal info]]
             [onyx.static.default-vals :refer [arg-or-default]]
             [onyx.plugin.protocols :as p]
+            [onyx.tasks.kinesis]
             [onyx.static.util :refer [kw->fn]]
             [schema.core :as s]
             [onyx.api])
