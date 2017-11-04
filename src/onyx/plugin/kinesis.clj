@@ -220,17 +220,16 @@
   p/Output
   (prepare-batch [this event replica _]
     true)
-  (write-batch [this {:keys [onyx.core/results]} replica _]
-    (let [segments (mapcat :leaves (:tree results))]
-      (when-not (empty? segments)
-        (let [put-results (.putRecords client 
-                                       (build-put-request stream-name 
-                                                          segments 
-                                                          serializer-fn))]
+  (write-batch [this {:keys [onyx.core/write-batch]} replica _]
+    (when-not (empty? write-batch)
+      (let [put-results (.putRecords client 
+                                     (build-put-request stream-name 
+                                                        write-batch 
+                                                        serializer-fn))]
 
-          (when-not (zero? (.getFailedRecordCount put-results))
-            (throw (ex-info "Put request failed. Rewinding job."
-                            {:restartable? true}))))))
+        (when-not (zero? (.getFailedRecordCount put-results))
+          (throw (ex-info "Put request failed. Rewinding job."
+                          {:restartable? true})))))
     true))
 
 (def write-defaults {})
