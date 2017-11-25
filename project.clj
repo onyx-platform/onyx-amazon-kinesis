@@ -13,7 +13,7 @@
                              :sign-releases false}}
   :dependencies [[org.clojure/clojure "1.8.0"]
                  ^{:voom {:repo "git@github.com:onyx-platform/onyx.git" :branch "master"}}
-                 [org.onyxplatform/onyx "0.12.0-20171124_234938-g3ec12bd"]
+                 [org.onyxplatform/onyx "0.12.0-20171125_000036-ge30182b"]
                  [com.amazonaws/amazon-kinesis-client "1.7.5"]
                  [cheshire "5.7.0"]]
   :profiles {:dev {:dependencies [[aero "0.2.0"]
