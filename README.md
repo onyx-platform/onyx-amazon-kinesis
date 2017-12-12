@@ -2,6 +2,13 @@
 
 Onyx plugin providing consumer and producer facilities for kinesis.
 
+Please note that this plugin is currently alpha quality, and does not support
+splitting or combining shards. Pull requests welcome!
+
+## Development
+
+The tests currently run slowly, as they have to create and delete shards on each run.
+
 #### Installation
 
 In your project file:

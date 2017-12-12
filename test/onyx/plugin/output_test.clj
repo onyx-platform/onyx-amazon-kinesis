@@ -8,6 +8,7 @@
             [onyx.tasks.core-async :as core-async]
             [onyx.plugin.core-async :refer [get-core-async-channels]]
             [onyx.plugin.test-utils :as test-utils]
+            [onyx.kinesis.utils :refer [create-stream delete-stream client-builder]]
             [onyx.plugin.kinesis]
             [onyx.api]
             [taoensso.timbre :as log])
@@ -55,41 +56,57 @@
             (deserialize-message-edn (.array (.getData rec))))
           (.getRecords records-result))))
 
+(def stream-name "ulul")
+
+(def n-partitions 2)
+
 (deftest kinesis-output-test
-  (let [stream-name "ulul"
-        client (onyx.plugin.kinesis/new-client {:kinesis/region "us-west-2"})
-        {:keys [test-config env-config peer-config]} (onyx.plugin.test-utils/read-config)
-        tenancy-id (str (java.util.UUID/randomUUID)) 
-        env-config (assoc env-config :onyx/tenancy-id tenancy-id)
-        peer-config (assoc peer-config :onyx/tenancy-id tenancy-id)
-        job (build-job stream-name 10 1000)
-        {:keys [in]} (get-core-async-channels job)
-        test-data [{:partition-key 1 :data {:n 0}}
-                   {:partition-key 2 :data {:n 1}}
-                   {:partition-key "tarein" :data {:n 2}}
-                   {:partition-key 3 :data {:n 3}}]
-        ;; get shard offset prior to writing any messages
-        iterator-req1 (-> (GetShardIteratorRequest.)
-                          (.withStreamName stream-name)
-                          (.withShardId "0")
-                          (.withShardIteratorType "LATEST"))
-        iterator-result1 (.getShardIterator client iterator-req1)
-        shard-iterator1 (.getShardIterator iterator-result1)
-        iterator-req2 (-> (GetShardIteratorRequest.)
-                          (.withStreamName stream-name)
-                          (.withShardId "1")
-                          (.withShardIteratorType "LATEST"))
-        iterator-result2 (.getShardIterator client iterator-req2)
-        shard-iterator2 (.getShardIterator iterator-result2)]
-      (with-test-env [test-env [4 env-config peer-config]]
-        (onyx.test-helper/validate-enough-peers! test-env job)
-        (run! #(>!! in %) test-data)
-        (close! in)
-        (->> (onyx.api/submit-job peer-config job)
-             :job-id
-             (onyx.test-helper/feedback-exception! peer-config))
-        (testing "routing to default topic"
-          (let [msgs (into (get-records client shard-iterator1)
-                           (get-records client shard-iterator2))]
-            (is (= [{:n 0} {:n 1} {:n 2} {:n 3}]
-                   msgs)))))))
+  (let [client (onyx.plugin.kinesis/new-client {:kinesis/region "us-west-2"})
+        _ (try
+           (delete-stream client stream-name)
+           ;; stream already existed (bad), give it some time to delete.
+           ;; FIXME: poll until deleted
+           (Thread/sleep 60000)
+           (catch Exception _))
+        _ (create-stream client stream-name n-partitions)
+        ;; FIXME: poll until created
+        _ (Thread/sleep 60000)]
+    (try 
+     (let [{:keys [test-config env-config peer-config]} (onyx.plugin.test-utils/read-config)
+           tenancy-id (str (java.util.UUID/randomUUID)) 
+           env-config (assoc env-config :onyx/tenancy-id tenancy-id)
+           peer-config (assoc peer-config :onyx/tenancy-id tenancy-id)
+           job (build-job stream-name 10 1000)
+           {:keys [in]} (get-core-async-channels job)
+           test-data [{:partition-key 1 :data {:n 0}}
+                      {:partition-key 2 :data {:n 1}}
+                      {:partition-key "tarein" :data {:n 2}}
+                      {:partition-key 3 :data {:n 3}}]
+           ;; get shard offset prior to writing any messages
+           iterator-req1 (-> (GetShardIteratorRequest.)
+                             (.withStreamName stream-name)
+                             (.withShardId "0")
+                             (.withShardIteratorType "LATEST"))
+           iterator-result1 (.getShardIterator client iterator-req1)
+           shard-iterator1 (.getShardIterator iterator-result1)
+           iterator-req2 (-> (GetShardIteratorRequest.)
+                             (.withStreamName stream-name)
+                             (.withShardId "1")
+                             (.withShardIteratorType "LATEST"))
+           iterator-result2 (.getShardIterator client iterator-req2)
+           shard-iterator2 (.getShardIterator iterator-result2)]
+       (with-test-env [test-env [4 env-config peer-config]]
+         (onyx.test-helper/validate-enough-peers! test-env job)
+         (run! #(>!! in %) test-data)
+         (close! in)
+         (->> (onyx.api/submit-job peer-config job)
+              :job-id
+              (onyx.test-helper/feedback-exception! peer-config))
+         (testing "routing to default topic"
+           (let [msgs (into (get-records client shard-iterator1)
+                            (get-records client shard-iterator2))]
+             (is (= [{:n 0} {:n 1} {:n 2} {:n 3}]
+                    msgs))))))  
+     (finally
+      ;; FIXME: poll until deleted
+      (delete-stream client stream-name)))))
