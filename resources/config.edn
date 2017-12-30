@@ -19,6 +19,7 @@
                                                 :test true}
   :onyx.messaging/impl                   :aeron
   :onyx.messaging/bind-addr              #env [BIND_ADDR "localhost"]
+  :onyx.peer/storage.zk.insanely-allow-windowing? true
   :onyx.messaging/peer-port              40200
   :onyx.messaging.aeron/embedded-driver? #cond {:default true
                                                 :bench true

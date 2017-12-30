@@ -2,33 +2,22 @@
   (:require [onyx.plugin.kinesis]
             [taoensso.timbre :as log]
             [aero.core :refer [read-config]]
-            [clojure.core.async :as async]))
+            [clojure.core.async :as async])
+  (:import [com.amazonaws.services.kinesis.model.CreateStreamRequest]
+           [com.amazonaws.services.kinesis AmazonKinesisClientBuilder AmazonKinesis]))
 
-; (defn- make-consumer
-;   [zk-addr]
-;   (consumer/make-consumer
-;    {:bootstrap.servers (vals (id->broker zk-addr))
-;     :group.id "onyx-consumer"
-;     :auto.offset.reset :earliest
-;     :receive.buffer.bytes 65536
-;     :enable.auto.commit false}
-;    (byte-array-deserializer)
-;    (byte-array-deserializer)))
+(defn client-builder []
+  (AmazonKinesisClientBuilder/defaultClient))
 
-; (defn- consumer-record->message
-;   [decompress-fn m]
-;   {:key (some-> m :key decompress-fn)
-;    :partition (:partition m)
-;    :topic (:topic m)
-;    :value (-> m :value decompress-fn)})
+(defn create-stream [^AmazonKinesis client stream-name shard-count]
+  (.createStream client
+                 (-> (com.amazonaws.services.kinesis.model.CreateStreamRequest.)
+                     (.withShardCount (int shard-count))
+                     (.withStreamName stream-name))))
 
-; (defn take-now
-;   "Reads whatever it can from a topic on the assumption that we've distributed
-;   work across multiple topics and another topic contained :done."
-;   ([zk-addr topic decompress-fn]
-;    (take-now zk-addr topic decompress-fn 5000))
-;   ([zk-addr topic decompress-fn timeout]
-;    (log/info {:msg "Taking now..." :topic topic})
-;    (let [c (make-consumer zk-addr)]
-;      (assign-partitions! c [{:topic topic :partition 0}])
-;      (mapv #(consumer-record->message decompress-fn %) (poll! c {:poll-timeout-ms timeout})))))
+(defn delete-stream [^AmazonKinesis client ^String stream-name]
+  (.deleteStream client stream-name))
+
+(create-stream (client-builder) "mystream" 1)
+
+(delete-stream (client-builder) "mystream")
