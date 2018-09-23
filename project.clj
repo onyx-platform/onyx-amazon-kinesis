@@ -1,4 +1,4 @@
-(defproject org.onyxplatform/onyx-amazon-kinesis "0.13.3.0"
+(defproject org.onyxplatform/onyx-amazon-kinesis "0.13.3.1-SNAPSHOT"
   :description "Onyx plugin for Amazon Kinesis"
   :url "https://github.com/onyx-platform/onyx-amazon-kinesis"
   :license {:name "Eclipse Public License"
