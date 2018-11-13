@@ -14,7 +14,7 @@ The tests currently run slowly, as they have to create and delete shards on each
 In your project file:
 
 ```clojure
-[org.onyxplatform/onyx-amazon-kinesis "0.14.0.1-SNAPSHOT"]
+[org.onyxplatform/onyx-amazon-kinesis "0.14.1.0"]
 ```
 
 In your peer boot-up namespace:
