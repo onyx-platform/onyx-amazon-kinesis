@@ -76,6 +76,7 @@ Lifecycle entry:
 |`:kinesis/endpoint-url`              | `string`  |         | Optional: The Kinesis endpoint-url to connect to.
 |`:kinesis/access-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
 |`:kinesis/secret-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
+|`:kinesis/reader-backoff-ms`         | `integer`  |         | Optional: Time to backoff a shard reader upon a ProvisionedThroughputExceededException
 
 ##### write-messages
 
