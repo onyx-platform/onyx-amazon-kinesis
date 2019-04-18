@@ -1,6 +1,7 @@
 (ns onyx.plugin.kinesis
   (:require [onyx.plugin.partition-assignment :refer [partitions-for-slot]]
             [taoensso.timbre :as log :refer [fatal debug info warn]]
+            [primitive-math :as pm]
             [onyx.static.default-vals :refer [arg-or-default]]
             [onyx.plugin.protocols :as p]
             [onyx.tasks.kinesis]
@@ -115,18 +116,23 @@
 (defn- paced-get-records
   [log-prefix
    backoff-ms
-   ^AmazonKinesisClient client 
-   ^GetRecordsRequest request]
-  (if (some? backoff-ms)
-    (let [result (try (.getRecords client request)
-                      (catch ProvisionedThroughputExceededException ex
-                        (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
-                        (Thread/sleep backoff-ms)
-                        ::backoff))]
-      (if (= ::backoff result)
-        (recur log-prefix backoff-ms client request)
-        result))
-    (.getRecords client request)))
+   client 
+   request
+   timeout-at-ms]
+  (let [now (System/currentTimeMillis)]
+    (when (pm/< now ^long timeout-at-ms) 
+      (if (some? backoff-ms)
+        (let [result (try (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)
+                          (catch ProvisionedThroughputExceededException ex
+                            ; We may end up sleeping until a time after timeout-at-ms, 
+                            ; but we take precendence over that in order to enforce the backoff period.
+                            (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
+                            (Thread/sleep backoff-ms)
+                            ::backoff))]
+          (if (= ::backoff result)
+            (recur log-prefix backoff-ms client request timeout-at-ms)
+            result))
+        (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)))))
 
 (deftype KinesisReadMessages 
   [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
@@ -171,16 +177,18 @@
     false)
 
   p/Input
-  (poll! [this _ _]
+  (poll! [this _ timeout-ms]
     (if (empty? items)
-      (let [request (new-record-request shard-iterator batch-size)
-            record-result (paced-get-records log-prefix reader-backoff-ms client request)
-            items* (.getRecords record-result)]
-        (set! items (rest items*))
-        (set! shard-iterator (.getNextShardIterator record-result))
-        (when-let [rec ^Record (first items*)]
-          (set! offset (.getSequenceNumber rec))
-          (rec->segment rec deserializer-fn)))
+      (let [end-time-ms (pm/+ (System/currentTimeMillis) ^long timeout-ms)
+            request (new-record-request shard-iterator batch-size)
+            record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+        (when (some? record-result)
+          (let [items* (.getRecords record-result)]
+            (set! items (rest items*))
+            (set! shard-iterator (.getNextShardIterator record-result))
+            (when-let [rec ^Record (first items*)]
+              (set! offset (.getSequenceNumber rec))
+              (rec->segment rec deserializer-fn)))))
       (let [items* (rest items)
             rec ^Record (first items)]
         (set! offset (.getSequenceNumber rec))
