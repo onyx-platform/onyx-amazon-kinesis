@@ -51,6 +51,7 @@ Catalog entry:
  :kinesis/stream-name "mystreamname"
  :kinesis/shard-initialize-type :trim-horizon
  :kinesis/deserializer-fn :my.ns/deserializer-fn
+ :kinesis/poll-interval-ms 250
  :onyx/batch-timeout 50
  :onyx/n-peers << NUMBER OF SHARDS TO READ PARTITIONS, UP TO N-SHARDS MAX >>
  :onyx/batch-size 100
@@ -77,6 +78,7 @@ Lifecycle entry:
 |`:kinesis/access-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
 |`:kinesis/secret-key`                | `string`  |         | Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper.
 |`:kinesis/reader-backoff-ms`         | `integer`  |         | Optional: Time to backoff a shard reader upon a ProvisionedThroughputExceededException
+|`:kinesis/poll-interval-ms`          | `integer`  |         | Optional: Minimum time in-between getRecords requests. Tune to match your provisioned shard throughput.
 
 ##### write-messages
 

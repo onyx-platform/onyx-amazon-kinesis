@@ -31,6 +31,7 @@
    (s/optional-key :kinesis/endpoint-url) s/Str
    (s/optional-key :kinesis/shard) (s/cond-pre s/Int s/Str)
    (s/optional-key :kinesis/reader-backoff-ms) s/Int
+   (s/optional-key :kinesis/poll-interval-ms) s/Int
    (os/restricted-ns :kinesis) s/Any})
 
 (s/defn ^:always-validate consumer

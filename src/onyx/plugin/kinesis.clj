@@ -1,6 +1,7 @@
 (ns onyx.plugin.kinesis
   (:require [onyx.plugin.partition-assignment :refer [partitions-for-slot]]
             [taoensso.timbre :as log :refer [fatal debug info warn]]
+            [primitive-math :as pm]
             [onyx.static.default-vals :refer [arg-or-default]]
             [onyx.plugin.protocols :as p]
             [onyx.tasks.kinesis]
@@ -8,6 +9,7 @@
             [schema.core :as s]
             [onyx.api])
   (:import [java.util.concurrent.atomic AtomicLong]
+           [com.amazonaws SdkClientException]
            [com.amazonaws.services.kinesis 
             AmazonKinesisClient AmazonKinesisAsyncClient
             AmazonKinesisClientBuilder AmazonKinesisAsyncClientBuilder]
@@ -112,25 +114,42 @@
    :sequence-number (.getSequenceNumber rec)
    :data (deserializer-fn (.array (.getData rec)))})
 
+(defn- aws-retryable? [^SdkClientException ex]
+  (let [cause (.getCause ex)]
+    (or (instance? java.net.UnknownHostException ex)
+        (instance? org.apache.http.conn.ConnectTimeoutException ex)
+        ;; The Javadoc says not to rely on this, but we'll fall back to this rather than false.
+        (.isRetryable ex))))
+
 (defn- paced-get-records
   [log-prefix
    backoff-ms
-   ^AmazonKinesisClient client 
-   ^GetRecordsRequest request]
-  (if (some? backoff-ms)
-    (let [result (try (.getRecords client request)
-                      (catch ProvisionedThroughputExceededException ex
-                        (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
-                        (Thread/sleep backoff-ms)
-                        ::backoff))]
-      (if (= ::backoff result)
-        (recur log-prefix backoff-ms client request)
-        result))
-    (.getRecords client request)))
+   client 
+   request
+   timeout-at-ms]
+  (let [now (System/currentTimeMillis)]
+    (when (pm/< now ^long timeout-at-ms) 
+      (try
+        (if (some? backoff-ms)
+          (try (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)
+               (catch ProvisionedThroughputExceededException ex
+                 ; We may end up sleeping until a time after timeout-at-ms, 
+                 ; but we take precendence over that in order to enforce the backoff period.
+                 (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
+                 (Thread/sleep backoff-ms)
+                 nil))
+          (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request))
+        (catch SdkClientException ex
+          (if (aws-retryable? ex)
+            (do
+              (warn log-prefix "Temporary Kinesis connection error" ex)
+              nil)
+            (throw ex)))))))
 
 (deftype KinesisReadMessages 
   [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
-   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms]
+   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms
+   ^:unsynchronized-mutable last-poll-at poll-interval-ms]
   p/Plugin
   (start [this event]
     (info log-prefix "Starting kinesis/read-messages task")
@@ -171,16 +190,21 @@
     false)
 
   p/Input
-  (poll! [this _ _]
+  (poll! [this _ timeout-ms]
     (if (empty? items)
-      (let [request (new-record-request shard-iterator batch-size)
-            record-result (paced-get-records log-prefix reader-backoff-ms client request)
-            items* (.getRecords record-result)]
-        (set! items (rest items*))
-        (set! shard-iterator (.getNextShardIterator record-result))
-        (when-let [rec ^Record (first items*)]
-          (set! offset (.getSequenceNumber rec))
-          (rec->segment rec deserializer-fn)))
+      (let [now (System/currentTimeMillis)]
+        (when (pm/<= (pm/+ ^long last-poll-at ^long poll-interval-ms) now)
+          (set! last-poll-at now)
+          (let [end-time-ms (pm/+ now ^long timeout-ms)
+                request (new-record-request shard-iterator batch-size)
+                record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+            (when (some? record-result)
+              (let [items* (.getRecords record-result)]
+                (set! items (rest items*))
+                (set! shard-iterator (.getNextShardIterator record-result))
+                (when-let [rec ^Record (first items*)]
+                  (set! offset (.getSequenceNumber rec))
+                  (rec->segment rec deserializer-fn)))))))
       (let [items* (rest items)
             rec ^Record (first items)]
         (set! offset (.getSequenceNumber rec))
@@ -193,12 +217,14 @@
         batch-size (:onyx/batch-size task-map)
         reader-backoff-ms (:kinesis/reader-backoff-ms task-map)
         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
+        poll-interval-ms (or (:kinesis/poll-interval-ms task-map) 0)
         shard-id (str (if-let [shard (:kinesis/shard task-map)]
                         shard
                         slot-id))
         client (new-client task-map)]
     (->KinesisReadMessages log-prefix task-map shard-id stream-name batch-size 
-                           batch-timeout deserializer-fn client nil nil nil reader-backoff-ms)))
+                           batch-timeout deserializer-fn client nil nil nil reader-backoff-ms
+                           0 poll-interval-ms)))
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
   (-> (PutRecordsRequestEntry.)
