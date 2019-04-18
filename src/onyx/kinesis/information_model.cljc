@@ -36,7 +36,13 @@
              :kinesis/secret-key
              {:doc "Optional: AWS access key to authorize when not using default provider chain. Avoid using kinesis/access-key if possible, as the key will be stored in ZooKeeper."
               :type :string
-              :optional? true}}}
+              :optional? true}
+
+             :kinesis/reader-backoff-ms
+             {:doc "Optional: Time to backoff a shard reader upon a ProvisionedThroughputExceededException"
+              :type :integer
+              :optional? true}
+             }}
 
     :onyx.plugin.kinesis/write-messages
     {:summary "Write messages to kinesis."
