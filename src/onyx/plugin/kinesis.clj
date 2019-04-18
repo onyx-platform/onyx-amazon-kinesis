@@ -9,6 +9,7 @@
             [schema.core :as s]
             [onyx.api])
   (:import [java.util.concurrent.atomic AtomicLong]
+           [com.amazonaws SdkClientException]
            [com.amazonaws.services.kinesis 
             AmazonKinesisClient AmazonKinesisAsyncClient
             AmazonKinesisClientBuilder AmazonKinesisAsyncClientBuilder]
@@ -113,6 +114,13 @@
    :sequence-number (.getSequenceNumber rec)
    :data (deserializer-fn (.array (.getData rec)))})
 
+(defn- aws-retryable? [^SdkClientException ex]
+  (let [cause (.getCause ex)]
+    (or (instance? java.net.UnknownHostException ex)
+        (instance? org.apache.http.conn.ConnectTimeoutException ex)
+        ;; The Javadoc says not to rely on this, but we'll fall back to this rather than false.
+        (.isRetryable ex))))
+
 (defn- paced-get-records
   [log-prefix
    backoff-ms
@@ -121,18 +129,22 @@
    timeout-at-ms]
   (let [now (System/currentTimeMillis)]
     (when (pm/< now ^long timeout-at-ms) 
-      (if (some? backoff-ms)
-        (let [result (try (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)
-                          (catch ProvisionedThroughputExceededException ex
-                            ; We may end up sleeping until a time after timeout-at-ms, 
-                            ; but we take precendence over that in order to enforce the backoff period.
-                            (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
-                            (Thread/sleep backoff-ms)
-                            ::backoff))]
-          (if (= ::backoff result)
-            (recur log-prefix backoff-ms client request timeout-at-ms)
-            result))
-        (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)))))
+      (try
+        (if (some? backoff-ms)
+          (try (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request)
+               (catch ProvisionedThroughputExceededException ex
+                 ; We may end up sleeping until a time after timeout-at-ms, 
+                 ; but we take precendence over that in order to enforce the backoff period.
+                 (warn log-prefix (str "Backing off reading records for " backoff-ms "ms") ex)
+                 (Thread/sleep backoff-ms)
+                 nil))
+          (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request))
+        (catch SdkClientException ex
+          (if (aws-retryable? ex)
+            (do
+              (warn log-prefix "Temporary Kinesis connection error" ex)
+              nil)
+            (throw ex)))))))
 
 (deftype KinesisReadMessages 
   [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
