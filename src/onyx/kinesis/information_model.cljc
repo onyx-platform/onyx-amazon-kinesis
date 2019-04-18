@@ -42,7 +42,11 @@
              {:doc "Optional: Time to backoff a shard reader upon a ProvisionedThroughputExceededException"
               :type :integer
               :optional? true}
-             }}
+
+             :kinesis/poll-interval-ms
+             {:doc "Optional: Minimum time in-between getRecords requests. Tune to match your provisioned shard throughput."
+              :type :integer
+              :optional? true}}}
 
     :onyx.plugin.kinesis/write-messages
     {:summary "Write messages to kinesis."

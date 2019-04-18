@@ -136,7 +136,8 @@
 
 (deftype KinesisReadMessages 
   [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
-   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms]
+   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms
+   ^:unsynchronized-mutable last-poll-at poll-interval-ms]
   p/Plugin
   (start [this event]
     (info log-prefix "Starting kinesis/read-messages task")
@@ -179,16 +180,19 @@
   p/Input
   (poll! [this _ timeout-ms]
     (if (empty? items)
-      (let [end-time-ms (pm/+ (System/currentTimeMillis) ^long timeout-ms)
-            request (new-record-request shard-iterator batch-size)
-            record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
-        (when (some? record-result)
-          (let [items* (.getRecords record-result)]
-            (set! items (rest items*))
-            (set! shard-iterator (.getNextShardIterator record-result))
-            (when-let [rec ^Record (first items*)]
-              (set! offset (.getSequenceNumber rec))
-              (rec->segment rec deserializer-fn)))))
+      (let [now (System/currentTimeMillis)]
+        (when (pm/<= (pm/+ ^long last-poll-at ^long poll-interval-ms) now)
+          (set! last-poll-at now)
+          (let [end-time-ms (pm/+ now ^long timeout-ms)
+                request (new-record-request shard-iterator batch-size)
+                record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+            (when (some? record-result)
+              (let [items* (.getRecords record-result)]
+                (set! items (rest items*))
+                (set! shard-iterator (.getNextShardIterator record-result))
+                (when-let [rec ^Record (first items*)]
+                  (set! offset (.getSequenceNumber rec))
+                  (rec->segment rec deserializer-fn)))))))
       (let [items* (rest items)
             rec ^Record (first items)]
         (set! offset (.getSequenceNumber rec))
@@ -201,12 +205,14 @@
         batch-size (:onyx/batch-size task-map)
         reader-backoff-ms (:kinesis/reader-backoff-ms task-map)
         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
+        poll-interval-ms (or (:kinesis/poll-interval-ms task-map) 0)
         shard-id (str (if-let [shard (:kinesis/shard task-map)]
                         shard
                         slot-id))
         client (new-client task-map)]
     (->KinesisReadMessages log-prefix task-map shard-id stream-name batch-size 
-                           batch-timeout deserializer-fn client nil nil nil reader-backoff-ms)))
+                           batch-timeout deserializer-fn client nil nil nil reader-backoff-ms
+                           0 poll-interval-ms)))
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
   (-> (PutRecordsRequestEntry.)
