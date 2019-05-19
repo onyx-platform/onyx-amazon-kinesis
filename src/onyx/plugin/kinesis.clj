@@ -192,19 +192,22 @@
   p/Input
   (poll! [this _ timeout-ms]
     (if (empty? items)
-      (let [now (System/currentTimeMillis)]
-        (when (pm/<= (pm/+ ^long last-poll-at ^long poll-interval-ms) now)
-          (set! last-poll-at now)
-          (let [end-time-ms (pm/+ now ^long timeout-ms)
-                request (new-record-request shard-iterator batch-size)
-                record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
-            (when (some? record-result)
-              (let [items* (.getRecords record-result)]
-                (set! items (rest items*))
-                (set! shard-iterator (.getNextShardIterator record-result))
-                (when-let [rec ^Record (first items*)]
-                  (set! offset (.getSequenceNumber rec))
-                  (rec->segment rec deserializer-fn)))))))
+      (let [now (System/currentTimeMillis)
+            next-poll-at (pm/+ ^long last-poll-at ^long poll-interval-ms)]
+        (if (pm/<= next-poll-at now)
+          (do
+            (set! last-poll-at now)
+            (let [end-time-ms (pm/+ now ^long timeout-ms)
+                  request (new-record-request shard-iterator batch-size)
+                  record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+              (when (some? record-result)
+                (let [items* (.getRecords record-result)]
+                  (set! items (rest items*))
+                  (set! shard-iterator (.getNextShardIterator record-result))
+                  (when-let [rec ^Record (first items*)]
+                    (set! offset (.getSequenceNumber rec))
+                    (rec->segment rec deserializer-fn))))))
+          (Thread/sleep (min timeout-ms (max 0 (pm/- next-poll-at now))))))
       (let [items* (rest items)
             rec ^Record (first items)]
         (set! offset (.getSequenceNumber rec))
