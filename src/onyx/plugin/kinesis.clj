@@ -193,28 +193,38 @@
 
   p/Input
   (poll! [this _ timeout-ms]
-    (if (empty? items)
-      (let [now (System/currentTimeMillis)
-            next-poll-at (pm/+ ^long last-poll-at ^long poll-interval-ms)]
-        (if (pm/<= next-poll-at now)
-          (do
-            (set! last-poll-at now)
-            (let [end-time-ms (pm/+ now ^long timeout-ms)
-                  request (new-record-request shard-iterator batch-size)
-                  record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
-              (when (some? record-result)
-                (let [items* (.getRecords record-result)]
-                  (set! items (rest items*))
-                  (set! shard-iterator (.getNextShardIterator record-result))
-                  (when-let [rec ^Record (first items*)]
-                    (set! offset (.getSequenceNumber rec))
-                    (rec->segment rec deserializer-fn))))))
-          (Thread/sleep (min timeout-ms (max 0 (pm/- next-poll-at now))))))
-      (let [items* (rest items)
-            rec ^Record (first items)]
-        (set! offset (.getSequenceNumber rec))
-        (set! items items*)
-        (rec->segment rec deserializer-fn)))))
+    (try
+      (if (empty? items)
+        (let [now (System/currentTimeMillis)
+              next-poll-at (pm/+ ^long last-poll-at ^long poll-interval-ms)]
+          (if (pm/<= next-poll-at now)
+            (do
+              (set! last-poll-at now)
+              (let [end-time-ms (pm/+ now ^long timeout-ms)
+                    request (new-record-request shard-iterator batch-size)
+                    record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+                (when (some? record-result)
+                  (let [items* (.getRecords record-result)]
+                    (set! items (rest items*))
+                    (set! shard-iterator (.getNextShardIterator record-result))
+                    (when-let [rec ^Record (first items*)]
+                      (set! offset (.getSequenceNumber rec))
+                      (rec->segment rec deserializer-fn))))))
+            (Thread/sleep (min timeout-ms (max 0 (pm/- next-poll-at now))))))
+        (let [items* (rest items)
+              rec ^Record (first items)]
+          (set! offset (.getSequenceNumber rec))
+          (set! items items*)
+          (rec->segment rec deserializer-fn)))
+      (catch ExpiredIteratorException ex
+        (log/debug {:message "Resetting shard iterator" :stream-name stream-name :shard-id shard-id :offset offset})
+        (let [reset-iterator (-> (GetShardIteratorRequest.)
+                                 (.withStreamName stream-name)
+                                 (.withShardId shard-id)
+                                 (.withStartingSequenceNumber offset)
+                                 (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))]
+          (set! shard-iterator (.getShardIterator (.getShardIterator client reset-iterator))))
+        nil))))
 
 (defn read-messages [{:keys [onyx.core/task-map onyx.core/log-prefix onyx.core/monitoring onyx.core/slot-id] :as event}]
   (let [{:keys [kinesis/stream-name kinesis/deserializer-fn]} task-map
