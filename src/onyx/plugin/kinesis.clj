@@ -16,7 +16,7 @@
            [com.amazonaws.auth AWSStaticCredentialsProvider BasicAWSCredentials]
            [com.amazonaws.client.builder AwsClientBuilder$EndpointConfiguration]
            [com.amazonaws.services.kinesis.model GetShardIteratorRequest GetRecordsRequest DescribeStreamResult
-            Record PutRecordsRequest PutRecordsRequestEntry ProvisionedThroughputExceededException]
+            Record PutRecordsRequest PutRecordsRequestEntry ProvisionedThroughputExceededException ExpiredIteratorException]
            [java.nio ByteBuffer]))
 
 (defn new-client ^AmazonKinesisClient
@@ -139,6 +139,8 @@
                  (Thread/sleep backoff-ms)
                  nil))
           (.getRecords ^AmazonKinesisClient client ^GetRecordsRequest request))
+        (catch ExpiredIteratorException ex
+          (throw ex))
         (catch SdkClientException ex
           (if (aws-retryable? ex)
             (do
