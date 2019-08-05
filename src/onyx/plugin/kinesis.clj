@@ -75,7 +75,7 @@
   {})
 
 (defn get-shard-properties
-  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} ^AmazonKinesisClient client ^String stream-name shard-id slot-id]
+  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} ^AmazonKinesisClient client ^String stream-name slot-id]
   (let [desc (.getStreamDescription ^DescribeStreamResult (.describeStream client stream-name))
         _ (when (not= (.getStreamStatus desc) "ACTIVE")
             (throw (ex-info "Stream is not currently active."
@@ -95,7 +95,7 @@
         n-peers-less-eq-n-shards (<= n-peers n-shards)
         shards-per-peer (+ (quot n-shards n-peers)
                            (max 1 (rem n-shards n-peers)))
-        peer-shards (if shard-id [shard-id]
+        peer-shards (if shard [shard]
                       (vec (map #(.getShardId %) (take shards-per-peer (drop (* slot-id shards-per-peer) shards)))))] 
     (when-not (or fixed-shard? fixed-npeers? n-peers-less-eq-n-shards)
       (let [e (ex-info ":onyx/min-peers must equal :onyx/max-peers, or :onyx/n-peers must be set, and :onyx/min-peers and :onyx/max-peers must not be set. Number of peers should also be less than or equal to the number of shards"
@@ -107,9 +107,7 @@
                         :task-map task-map})] 
         (log/error e)
         (throw e)))
-    (when (not= 1 (count peer-shards))
-      (throw (ex-info "More than one shard per per is not supported" {:peer-shards peer-shards :shards-per-peer shards-per-peer})))
-    {:shard-id (first peer-shards)}))
+    {:peer-shards peer-shards}))
 
 (defn new-record-request [shard-iterator limit]
   (-> (GetRecordsRequest.)
@@ -156,38 +154,53 @@
               nil)
             (throw ex)))))))
 
-(deftype KinesisReadMessages 
-  [log-prefix task-map ^:unsynchronized-mutable shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
-   ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms
-   ^:unsynchronized-mutable last-poll-at poll-interval-ms slot-id]
+(defn- current-shard-id
+  [{:keys [peer-shards shard-idx]}]
+  (nth peer-shards @shard-idx))
+
+(defn- next-shard!
+  [{:keys [client stream-name task-map peer-shards shard-idx offsets shard-iterators] :as this}]
+  (let [next-shard-idx (swap! shard-idx #(mod (inc %) (count peer-shards)))
+        shard-id (nth peer-shards next-shard-idx)]
+    (if-let [nsi (get @shard-iterators shard-id)]
+      {:shard-id shard-id
+       :shard-iterator nsi}
+      (let [current-offset (get @offsets shard-id)
+            iter (if current-offset
+                   (-> (GetShardIteratorRequest.)
+                       (.withStreamName stream-name)
+                       (.withShardId shard-id)
+                       (.withStartingSequenceNumber current-offset)
+                       (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))
+                   (-> (GetShardIteratorRequest.)
+                       (.withStreamName stream-name)
+                       (.withShardId shard-id)
+                       (.withShardIteratorType (shard-initialize-type task-map))))
+            shard-iterator (.getShardIterator (.getShardIterator client iter))]
+        {:shard-id shard-id
+         :shard-iterator shard-iterator}))))
+
+(defrecord KinesisReadMessages 
+  [log-prefix task-map stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
+   offsets items reader-backoff-ms last-poll-at poll-interval-ms slot-id peer-shards shard-idx shard-iterators]
   p/Plugin
   (start [this event]
     (info log-prefix "Starting kinesis/read-messages task")
     (s/validate onyx.tasks.kinesis/KinesisInputTaskMap task-map)
-    (set! shard-id (:shard-id (get-shard-properties task-map client stream-name shard-id slot-id)))
-    this)
+    (let [{:keys [peer-shards]} (get-shard-properties task-map client stream-name slot-id)]
+      (reset! shard-idx 0)
+      (assoc this :peer-shards peer-shards)))
 
   (stop [this event] 
     this)
 
   p/Checkpointed
   (checkpoint [this]
-    offset)
+    @offsets)
 
   (recover! [this replica-version checkpoint]
-    (let [initial (if checkpoint 
-                    (-> (GetShardIteratorRequest.)
-                        (.withStreamName stream-name)
-                        (.withShardId shard-id)
-                        (.withStartingSequenceNumber checkpoint)
-                        (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))
-                    (-> (GetShardIteratorRequest.)
-                        (.withStreamName stream-name)
-                        (.withShardId shard-id)
-                        (.withShardIteratorType (shard-initialize-type task-map))))
-          shard-iter (.getShardIterator (.getShardIterator client initial))]
-      (set! shard-iterator shard-iter)
-      (set! offset checkpoint))
+    (log/debug {:message "Recover offsets" :checkpoint checkpoint})
+    (reset! offsets checkpoint)
     this)
 
   (checkpointed! [this epoch])
@@ -201,38 +214,35 @@
 
   p/Input
   (poll! [this _ timeout-ms]
-    (log/info {:message "Polling shard" :shard-id shard-id})
     (try
-      (if (empty? items)
-        (let [now (System/currentTimeMillis)
-              next-poll-at (pm/+ ^long last-poll-at ^long poll-interval-ms)]
-          (if (pm/<= next-poll-at now)
-            (do
-              (set! last-poll-at now)
-              (let [end-time-ms (pm/+ now ^long timeout-ms)
-                    request (new-record-request shard-iterator batch-size)
-                    record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
-                (when (some? record-result)
-                  (let [items* (.getRecords record-result)]
-                    (set! items (rest items*))
-                    (set! shard-iterator (.getNextShardIterator record-result))
-                    (when-let [rec ^Record (first items*)]
-                      (set! offset (.getSequenceNumber rec))
-                      (rec->segment rec deserializer-fn))))))
-            (Thread/sleep (min timeout-ms (max 0 (pm/- next-poll-at now))))))
-        (let [items* (rest items)
-              rec ^Record (first items)]
-          (set! offset (.getSequenceNumber rec))
-          (set! items items*)
-          (rec->segment rec deserializer-fn)))
+      (let [items* @items]
+        (if (empty? items*)
+          (let [now (System/currentTimeMillis)
+                next-poll-at (pm/+ ^long @last-poll-at ^long poll-interval-ms)]
+            (if (pm/<= next-poll-at now)
+              (do
+                (reset! last-poll-at now)
+                (let [end-time-ms (pm/+ now ^long timeout-ms)
+                      {:keys [shard-id shard-iterator]} (next-shard! this)
+                      request (new-record-request shard-iterator batch-size)
+                      record-result (paced-get-records log-prefix reader-backoff-ms client request end-time-ms)]
+                  (when (some? record-result)
+                    (let [items* (.getRecords record-result)]
+                      (swap! shard-iterators assoc shard-id (.getNextShardIterator record-result))
+                      (reset! items (rest items*))
+                      (when-let [rec ^Record (first items*)]
+                        (swap! offsets assoc shard-id (.getSequenceNumber rec))
+                        (rec->segment rec deserializer-fn))))))
+              (Thread/sleep (min timeout-ms (max 0 (pm/- next-poll-at now))))))
+          (let [shard-id (current-shard-id this)
+                rec ^Record (first items*)]
+            (reset! items (rest items*))
+            (swap! offsets assoc shard-id (.getSequenceNumber rec))
+            (rec->segment rec deserializer-fn))))
       (catch ExpiredIteratorException ex
-        (log/debug {:message "Resetting shard iterator" :stream-name stream-name :shard-id shard-id :offset offset})
-        (let [reset-iterator (-> (GetShardIteratorRequest.)
-                                 (.withStreamName stream-name)
-                                 (.withShardId shard-id)
-                                 (.withStartingSequenceNumber offset)
-                                 (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))]
-          (set! shard-iterator (.getShardIterator (.getShardIterator client reset-iterator))))
+        (let [shard-id (current-shard-id this)]
+          (log/debug {:message "Resetting expired shard iterator" :stream-name stream-name :shard-id shard-id})
+          (swap! shard-iterators dissoc shard-id))
         nil))))
 
 (defn read-messages [{:keys [onyx.core/task-map onyx.core/log-prefix onyx.core/monitoring onyx.core/slot-id] :as event}]
@@ -242,11 +252,24 @@
         reader-backoff-ms (:kinesis/reader-backoff-ms task-map)
         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
         poll-interval-ms (or (:kinesis/poll-interval-ms task-map) 0)
-        shard-id (:kinesis/shard task-map)
         client (new-client task-map)]
-    (->KinesisReadMessages log-prefix task-map shard-id stream-name batch-size 
-                           batch-timeout deserializer-fn client nil nil nil reader-backoff-ms
-                           0 poll-interval-ms slot-id)))
+    (map->KinesisReadMessages 
+      {:log-prefix log-prefix 
+       :task-map task-map 
+       :stream-name stream-name 
+       :batch-size batch-size 
+       :batch-timeout batch-timeout 
+       :deserializer-fn deserializer-fn
+       :client client 
+       :offsets (atom {})
+       :items (atom nil)
+       :reader-backoff-ms reader-backoff-ms
+       :last-poll-at (atom 0)
+       :poll-interval-ms poll-interval-ms 
+       :slot-id slot-id
+       :peer-shards []
+       :shard-idx (atom 0)
+       :shard-iterators (atom {})})))
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
   (-> (PutRecordsRequestEntry.)
