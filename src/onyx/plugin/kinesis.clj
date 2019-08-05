@@ -74,8 +74,8 @@
 (def defaults
   {})
 
-(defn check-shard-properties! 
-  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} ^AmazonKinesisClient client ^String stream-name]
+(defn get-shard-properties
+  [{:keys [onyx/min-peers onyx/max-peers onyx/n-peers kinesis/shard] :as task-map} ^AmazonKinesisClient client ^String stream-name shard-id slot-id]
   (let [desc (.getStreamDescription ^DescribeStreamResult (.describeStream client stream-name))
         _ (when (not= (.getStreamStatus desc) "ACTIVE")
             (throw (ex-info "Stream is not currently active."
@@ -84,14 +84,19 @@
         _ (when (.isHasMoreShards desc)
             (throw (ex-info "More shards available, and unable to determine whether the number of peers matches the number of shards. This case is not currently handled."
                             {:recoverable? false})))
-        n-shards (count (.getShards desc))
+        shards (.getShards desc)
+        n-shards (count shards)
         fixed-shard? (and shard 
                           (or (= 1 n-peers)
                               (= 1 max-peers)))
         fixed-npeers? (or (= min-peers max-peers) (= 1 max-peers)
                           (and n-peers (and (not min-peers) (not max-peers))))
         n-peers (or max-peers n-peers)
-        n-peers-less-eq-n-shards (<= n-peers n-shards)] 
+        n-peers-less-eq-n-shards (<= n-peers n-shards)
+        shards-per-peer (+ (quot n-shards n-peers)
+                           (max 1 (rem n-shards n-peers)))
+        peer-shards (if shard-id [shard-id]
+                      (vec (map #(.getShardId %) (take shards-per-peer (drop (* slot-id shards-per-peer) shards)))))] 
     (when-not (or fixed-shard? fixed-npeers? n-peers-less-eq-n-shards)
       (let [e (ex-info ":onyx/min-peers must equal :onyx/max-peers, or :onyx/n-peers must be set, and :onyx/min-peers and :onyx/max-peers must not be set. Number of peers should also be less than or equal to the number of shards"
                        {:n-partitions n-shards 
@@ -101,7 +106,10 @@
                         :recoverable? false
                         :task-map task-map})] 
         (log/error e)
-        (throw e)))))
+        (throw e)))
+    (when (not= 1 (count peer-shards))
+      (throw (ex-info "More than one shard per per is not supported" {:peer-shards peer-shards :shards-per-peer shards-per-peer})))
+    {:shard-id (first peer-shards)}))
 
 (defn new-record-request [shard-iterator limit]
   (-> (GetRecordsRequest.)
@@ -149,14 +157,14 @@
             (throw ex)))))))
 
 (deftype KinesisReadMessages 
-  [log-prefix task-map shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
+  [log-prefix task-map ^:unsynchronized-mutable shard-id stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
    ^:unsynchronized-mutable offset ^:unsynchronized-mutable items ^:unsynchronized-mutable shard-iterator reader-backoff-ms
-   ^:unsynchronized-mutable last-poll-at poll-interval-ms]
+   ^:unsynchronized-mutable last-poll-at poll-interval-ms slot-id]
   p/Plugin
   (start [this event]
     (info log-prefix "Starting kinesis/read-messages task")
-    (check-shard-properties! task-map client stream-name)
     (s/validate onyx.tasks.kinesis/KinesisInputTaskMap task-map)
+    (set! shard-id (:shard-id (get-shard-properties task-map client stream-name shard-id slot-id)))
     this)
 
   (stop [this event] 
@@ -193,6 +201,7 @@
 
   p/Input
   (poll! [this _ timeout-ms]
+    (log/info {:message "Polling shard" :shard-id shard-id})
     (try
       (if (empty? items)
         (let [now (System/currentTimeMillis)
@@ -233,13 +242,11 @@
         reader-backoff-ms (:kinesis/reader-backoff-ms task-map)
         deserializer-fn (kw->fn (:kinesis/deserializer-fn task-map))
         poll-interval-ms (or (:kinesis/poll-interval-ms task-map) 0)
-        shard-id (str (if-let [shard (:kinesis/shard task-map)]
-                        shard
-                        slot-id))
+        shard-id (:kinesis/shard task-map)
         client (new-client task-map)]
     (->KinesisReadMessages log-prefix task-map shard-id stream-name batch-size 
                            batch-timeout deserializer-fn client nil nil nil reader-backoff-ms
-                           0 poll-interval-ms)))
+                           0 poll-interval-ms slot-id)))
 
 (defn segment->put-records-entry [{:keys [partition-key data]} serializer-fn]
   (-> (PutRecordsRequestEntry.)
