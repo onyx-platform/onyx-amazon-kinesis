@@ -107,6 +107,7 @@
                         :task-map task-map})] 
         (log/error e)
         (throw e)))
+    (log/info {:message "Shards for peer" :peer-shards peer-shards})
     {:peer-shards peer-shards}))
 
 (defn new-record-request [shard-iterator limit]
