@@ -107,7 +107,7 @@
                         :task-map task-map})] 
         (log/error e)
         (throw e)))
-    (log/info {:message "Shards for peer" :peer-shards peer-shards})
+    (log/debug {:message "Shards for peer" :peer-shards peer-shards})
     {:peer-shards peer-shards}))
 
 (defn new-record-request [shard-iterator limit]
@@ -162,24 +162,27 @@
 (defn- next-shard!
   [{:keys [client stream-name task-map peer-shards shard-idx offsets shard-iterators] :as this}]
   (let [next-shard-idx (swap! shard-idx #(mod (inc %) (count peer-shards)))
-        shard-id (nth peer-shards next-shard-idx)]
-    (if-let [nsi (get @shard-iterators shard-id)]
-      {:shard-id shard-id
-       :shard-iterator nsi}
-      (let [current-offset (get @offsets shard-id)
-            iter (if current-offset
-                   (-> (GetShardIteratorRequest.)
-                       (.withStreamName stream-name)
-                       (.withShardId shard-id)
-                       (.withStartingSequenceNumber current-offset)
-                       (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))
-                   (-> (GetShardIteratorRequest.)
-                       (.withStreamName stream-name)
-                       (.withShardId shard-id)
-                       (.withShardIteratorType (shard-initialize-type task-map))))
-            shard-iterator (.getShardIterator (.getShardIterator client iter))]
-        {:shard-id shard-id
-         :shard-iterator shard-iterator}))))
+        shard-id (nth peer-shards next-shard-idx)
+        result
+        (if-let [nsi (get @shard-iterators shard-id)]
+          {:shard-id shard-id
+           :shard-iterator nsi}
+          (let [current-offset (get @offsets shard-id)
+                iter (if current-offset
+                       (-> (GetShardIteratorRequest.)
+                           (.withStreamName stream-name)
+                           (.withShardId shard-id)
+                           (.withStartingSequenceNumber current-offset)
+                           (.withShardIteratorType "AFTER_SEQUENCE_NUMBER"))
+                       (-> (GetShardIteratorRequest.)
+                           (.withStreamName stream-name)
+                           (.withShardId shard-id)
+                           (.withShardIteratorType (shard-initialize-type task-map))))
+                shard-iterator (.getShardIterator (.getShardIterator client iter))]
+            {:shard-id shard-id
+             :shard-iterator shard-iterator}))]
+    (log/trace "Next shard" result)
+    result))
 
 (defrecord KinesisReadMessages 
   [log-prefix task-map stream-name batch-size batch-timeout deserializer-fn ^AmazonKinesisClient client
@@ -200,7 +203,7 @@
     @offsets)
 
   (recover! [this replica-version checkpoint]
-    (log/debug {:message "Recover offsets" :checkpoint checkpoint})
+    (log/debug {:message "Recoverng shard offsets" :checkpoint checkpoint})
     (reset! offsets checkpoint)
     this)
 
